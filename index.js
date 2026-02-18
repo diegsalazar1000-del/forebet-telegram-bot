@@ -80,7 +80,8 @@ bot.command("reset", (ctx) => {
 bot.command("debugon", async (ctx) => {
   debug = true;
   debugChatId = ctx.chat.id;
-  await ctx.reply("🧪 Debug activo en este chat.\nWatch=ON");
+  await ctx.reply("🧪 Debug ON");
+  await dmsg(`🧪 Debug activo en este chat.\nWatch=${watching ? "ON" : "OFF"}`);
 });
 
 bot.command("debugoff", (ctx) => {
@@ -89,30 +90,29 @@ bot.command("debugoff", (ctx) => {
   ctx.reply("🧪 Debug OFF");
 });
 
-// ===================== BROWSERLESS (IIFE para permitir return) =====================
+// ===================== BROWSERLESS (code como función) =====================
 async function browserlessGetHtml(url) {
   const endpoint = `https://chrome.browserless.io/function?token=${encodeURIComponent(
     BROWSERLESS_TOKEN
   )}`;
 
-  const safeUrl = String(url).replace(/"/g, '\\"');
+  const safeUrl = String(url).replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 
-  // ✅ Envolvemos en una IIFE async para que "return" sea válido.
-  const payload = {
-    code: `
-      (async () => {
-        await page.goto("${safeUrl}", { waitUntil: "domcontentloaded", timeout: 60000 });
-        await page.waitForSelector("table", { timeout: 25000 });
-        await page.waitForTimeout(8000);
-        return await page.content();
-      })()
-    `,
-  };
+  // ✅ AQUÍ está la clave:
+  // "code" debe ser una FUNCIÓN (representada como string, pero con forma de función).
+  const codeAsFunction = `
+    async ({ page }) => {
+      await page.goto("${safeUrl}", { waitUntil: "domcontentloaded", timeout: 60000 });
+      await page.waitForSelector("table", { timeout: 25000 });
+      await page.waitForTimeout(8000);
+      return await page.content();
+    }
+  `;
 
   const res = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(payload),
+    body: JSON.stringify({ code: codeAsFunction }),
   });
 
   const text = await res.text().catch(() => "");
@@ -194,11 +194,16 @@ function msgOver(m) {
   return `🚨 OVER 2.5 (Forebet)\n\n⚽ ${m.match}\n⏱ ${m.minute}'\n🔢 ${m.score}\n📊 ${m.prob}%`;
 }
 
+function msgBTTS(m) {
+  return `🔥 BTTS (Forebet)\n\n⚽ ${m.match}\n⏱ ${m.minute}'\n🔢 ${m.score}\n📊 ${m.prob}%`;
+}
+
 // ===================== LOOP =====================
 async function poll() {
   if (debug) await dmsg(`⏱ Heartbeat OK. Watch=${watching ? "ON" : "OFF"}`);
   if (!watching) return;
 
+  // OVER
   try {
     const htmlOver = await browserlessGetHtml(URL_OVER25);
     const over = scrapeMatches(htmlOver);
@@ -220,10 +225,23 @@ async function poll() {
     await dmsg(`❌ Over error: ${e.message}`);
   }
 
+  // BTTS
   try {
     const htmlBtts = await browserlessGetHtml(URL_BTTS);
     const btts = scrapeMatches(htmlBtts);
     await dmsg(`DEBUG BTTS: parsed=${btts.length}`);
+
+    for (const m of btts) {
+      if (m.prob < RULES.btts.minProb) continue;
+      if (!(m.minute >= RULES.btts.minMinuteInclusive)) continue;
+      if (m.score !== RULES.btts.score) continue;
+
+      const key = `B|${m.match}|${m.minute}|${m.score}|${m.prob}`;
+      if (alerted.has(key)) continue;
+      alerted.add(key);
+
+      await bot.telegram.sendMessage(CHAT_ID, msgBTTS(m));
+    }
   } catch (e) {
     console.log("BTTS error:", e.message);
     await dmsg(`❌ BTTS error: ${e.message}`);
