@@ -43,7 +43,40 @@ function qualifies({ prob, minute, score }) {
   );
 }
 
-function extractLiveCandidates(html) {
+function extractLiveCandidates(html)
+
+function extractBTTS(html){
+  const results = [];
+  const re = /BTTS.*?(\d{1,3})%/gi;
+
+  let m;
+  while((m = re.exec(html)) !== null){
+    const prob = parseInt(m[1]);
+    if(prob < 70) continue;
+
+    const start = Math.max(0, m.index - 250);
+    const end = Math.min(html.length, m.index + 250);
+    const chunk = html.slice(start,end);
+
+    const minuteMatch = chunk.match(/(\d{1,3})\s*['’]/);
+    const scoreMatch = chunk.match(/\b(\d{1,2}\s*-\s*\d{1,2})\b/);
+
+    if(!minuteMatch || !scoreMatch) continue;
+
+    const minute = parseInt(minuteMatch[1]);
+    const score = scoreMatch[1].replace(/\s*/g,"");
+
+    if(minute >= 30 && score === "0-0"){
+      const nameMatch = chunk.match(/([A-Za-zÁÉÍÓÚÜÑ0-9 .'-]{3,}?)\s+vs\s+([A-Za-zÁÉÍÓÚÜÑ0-9 .'-]{3,})/i);
+      const matchName = nameMatch ? `${nameMatch[1]} vs ${nameMatch[2]}` : "Partido en vivo";
+
+      results.push({matchName,prob,minute,score});
+    }
+  }
+  return results;
+}
+
+{
   // Heurística simple: buscamos % y miramos alrededor para minuto y marcador
   const results = [];
   const re = /(\d{1,3})%/g;
@@ -91,6 +124,25 @@ async function poll() {
 
     const candidates = extractLiveCandidates(html).filter(qualifies);
 
+    // ===== ALERTAS BTTS =====
+const bttsMatches = extractBTTS(html);
+
+for(const m of bttsMatches){
+  const key = "BTTS"+m.matchName;
+  if(alerted.has(key)) continue;
+  alerted.add(key);
+
+  await bot.telegram.sendMessage(
+    CHAT_ID,
+`🔥 ALERTA BTTS (PARTIDO ABIERTO)
+
+⚽ ${m.matchName}
+⏱ Min ${m.minute}'
+🔢 0-0
+📊 Prob BTTS ${m.prob}%`
+  );
+}
+    
     // Solo alertar si hay al menos uno nuevo
     for (const c of candidates) {
       const alertKey = `${c.matchName}|${c.score}|${c.prob}`;
