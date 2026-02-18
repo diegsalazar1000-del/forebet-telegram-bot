@@ -1,3 +1,11 @@
+
+const express = require("express");
+const app = express();
+
+const PORT = process.env.PORT || 10000;
+app.get("/", (req, res) => res.send("OK"));
+app.listen(PORT, () => console.log("Web alive on", PORT));
+
 const { Telegraf } = require("telegraf");
 
 const bot = new Telegraf(process.env.BOT_TOKEN);
