@@ -29,6 +29,7 @@ const RULES = {
 const app = express();
 const PORT = process.env.PORT || 10000;
 app.get("/", (_req, res) => res.send("OK"));
+app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 app.listen(PORT, () => console.log("Web alive on", PORT));
 
 // ===================== TELEGRAM BOT =====================
@@ -50,20 +51,20 @@ async function dmsg(text) {
 
 bot.start((ctx) =>
   ctx.reply(
-    "✅ Bot listo.\n\n/watch activar\n/stop detener\n/status estado\n/debugon debug\n/debugoff\n/reset limpiar alertas"
+    "✅ Bot listo.\n\n/watch activar\n/stop detener\n/status estado\n/ping prueba\n/debugon debug\n/debugoff\n/reset limpiar alertas"
   )
 );
+
+bot.command("ping", (ctx) => ctx.reply("🏓 PONG (el bot está vivo)"));
 
 bot.command("watch", async (ctx) => {
   watching = true;
   await ctx.reply("🟢 Monitoreo activado");
-  await dmsg("✅ Debug: /watch activado (poll correrá cada minuto).");
 });
 
 bot.command("stop", async (ctx) => {
   watching = false;
   await ctx.reply("🔴 Monitoreo detenido");
-  await dmsg("⚠️ Debug: /watch está OFF, no se ejecuta poll.");
 });
 
 bot.command("status", (ctx) => {
@@ -81,9 +82,7 @@ bot.command("debugon", async (ctx) => {
   debug = true;
   debugChatId = ctx.chat.id;
   await ctx.reply("🧪 Debug ON");
-  await dmsg(
-    `🧪 Debug está ON en ESTE chat.\nWatch: ${watching ? "ON" : "OFF"}\nSi Watch está OFF, manda /watch para que empiece el poll.`
-  );
+  await dmsg(`🧪 Debug activo en este chat.\nWatch=${watching ? "ON" : "OFF"}`);
 });
 
 bot.command("debugoff", (ctx) => {
@@ -92,35 +91,41 @@ bot.command("debugoff", (ctx) => {
   ctx.reply("🧪 Debug OFF");
 });
 
-// ===================== BROWSERLESS =====================
+// ===================== BROWSERLESS (con error detallado) =====================
 async function browserlessGetHtml(url) {
+  // Probamos endpoint /function (más control)
   const endpoint = `https://chrome.browserless.io/function?token=${encodeURIComponent(
     BROWSERLESS_TOKEN
   )}`;
 
   const safeUrl = String(url).replace(/"/g, '\\"');
 
+  const payload = {
+    code: `
+      module.exports = async ({ page }) => {
+        await page.goto("${safeUrl}", { waitUntil: "domcontentloaded", timeout: 60000 });
+        // Esperar tabla (Forebet)
+        await page.waitForSelector("table", { timeout: 25000 });
+        await page.waitForTimeout(6000);
+        return await page.content();
+      }
+    `,
+  };
+
   const res = await fetch(endpoint, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      code: `
-        module.exports = async ({ page }) => {
-          await page.goto("${safeUrl}", { waitUntil: "networkidle2", timeout: 60000 });
-          await page.waitForSelector("table", { timeout: 25000 });
-          await page.waitForTimeout(6000);
-          return await page.content();
-        }
-      `,
-    }),
+    body: JSON.stringify(payload),
   });
 
+  const text = await res.text().catch(() => "");
+
   if (!res.ok) {
-    const t = await res.text().catch(() => "");
-    throw new Error(\`Browserless HTTP \${res.status}: \${t.slice(0, 150)}\`);
+    // Lanzamos un error con el status real y un pedazo del cuerpo
+    throw new Error(`Browserless HTTP ${res.status}: ${text.slice(0, 180)}`);
   }
 
-  return await res.text();
+  return text;
 }
 
 // ===================== PARSER =====================
@@ -168,6 +173,7 @@ function scrapeMatches(html) {
     const text = norm($tr.text());
     if (!text) return;
 
+    // si por cualquier motivo aparece un challenge
     if (/Just a moment|verify you are human/i.test(text)) return;
 
     const prob = parseProb2(text);
@@ -181,7 +187,7 @@ function scrapeMatches(html) {
       minute,
       score,
       prob,
-      keyRaw: text.slice(0, 160),
+      raw: text.slice(0, 160),
     });
   });
 
@@ -190,38 +196,27 @@ function scrapeMatches(html) {
 
 // ===================== ALERTS =====================
 function msgOver(m) {
-  return `🚨 OVER 2.5 (Forebet)
-
-⚽ ${m.match}
-⏱ Minuto: ${m.minute}'
-🔢 Marcador: ${m.score}
-📊 Prob Más 2.5: ${m.prob}%`;
+  return `🚨 OVER 2.5 (Forebet)\n\n⚽ ${m.match}\n⏱ ${m.minute}'\n🔢 ${m.score}\n📊 ${m.prob}%`;
 }
 
 function msgBTTS(m) {
-  return `🔥 BTTS (Forebet)
-
-⚽ ${m.match}
-⏱ Minuto: ${m.minute}'
-🔢 Marcador: ${m.score}
-📊 Prob “Sí”: ${m.prob}%`;
+  return `🔥 BTTS (Forebet)\n\n⚽ ${m.match}\n⏱ ${m.minute}'\n🔢 ${m.score}\n📊 ${m.prob}%`;
 }
 
-// ===================== MAIN LOOP =====================
+// ===================== LOOP =====================
 async function poll() {
-  // ✅ Latido de debug para confirmar que el proceso vive,
-  // aunque /watch esté apagado
+  // Heartbeat: siempre (aunque watching OFF o haya errores)
   if (debug) {
-    await dmsg(`⏱ Heartbeat: bot vivo. Watch=${watching ? "ON" : "OFF"}`);
+    await dmsg(`⏱ Heartbeat OK. Watch=${watching ? "ON" : "OFF"}`);
   }
 
   if (!watching) return;
 
-  // OVER
+  // OVER 2.5
   try {
     const htmlOver = await browserlessGetHtml(URL_OVER25);
     const over = scrapeMatches(htmlOver);
-    await dmsg(`En vivo Over 2.5 goles:\nDEBUG Over: parsed=${over.length}`);
+    await dmsg(`DEBUG Over: parsed=${over.length}`);
 
     for (const m of over) {
       if (m.prob < RULES.over25.minProb) continue;
@@ -243,7 +238,7 @@ async function poll() {
   try {
     const htmlBtts = await browserlessGetHtml(URL_BTTS);
     const btts = scrapeMatches(htmlBtts);
-    await dmsg(`En vivo BTTS:\nDEBUG BTTS: parsed=${btts.length}`);
+    await dmsg(`DEBUG BTTS: parsed=${btts.length}`);
 
     for (const m of btts) {
       if (m.prob < RULES.btts.minProb) continue;
