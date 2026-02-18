@@ -1,0 +1,13 @@
+{
+  "name": "forebet-live-alerts-bot",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.16.3",
+    "playwright": "^1.50.0"
+  }
+}
+
