@@ -1,76 +1,114 @@
 const express = require("express");
+const fetch = require("node-fetch");
+const { Telegraf } = require("telegraf");
+
+// --- Mini web para que Render tenga tráfico ---
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-app.get("/", (req, res) => res.send("OK"));
-app.listen(PORT, () => console.log("Alive on", PORT));
-
-const express = require("express");
-const app = express();
-
-const PORT = process.env.PORT || 10000;
 app.get("/", (req, res) => res.send("OK"));
 app.listen(PORT, () => console.log("Web alive on", PORT));
 
-const { Telegraf } = require("telegraf");
-
-const bot = new Telegraf(process.env.BOT_TOKEN);
+// --- Bot ---
+const BOT_TOKEN = process.env.BOT_TOKEN;
 const CHAT_ID = process.env.CHAT_ID;
 
+if (!BOT_TOKEN) throw new Error("Falta BOT_TOKEN");
+if (!CHAT_ID) throw new Error("Falta CHAT_ID");
+
+const bot = new Telegraf(BOT_TOKEN);
+
 let watching = false;
-let alertedMatches = new Set();
+const alerted = new Set();
 
-bot.start(ctx => ctx.reply("Bot listo. Usa /watch para activar"));
-bot.command("watch", ctx => {
+bot.start((ctx) => ctx.reply("Bot listo ✅ Usa /watch para activar y /stop para parar"));
+bot.command("watch", (ctx) => {
   watching = true;
-  ctx.reply("Monitoreo activado ⚽");
+  ctx.reply("🟢 Monitoreo activado");
 });
-bot.command("stop", ctx => {
+bot.command("stop", (ctx) => {
   watching = false;
-  ctx.reply("Monitoreo detenido");
+  ctx.reply("🔴 Monitoreo detenido");
+});
+bot.command("reset", (ctx) => {
+  alerted.clear();
+  ctx.reply("🧹 Reset listo (puede volver a alertar los mismos partidos)");
 });
 
-async function checkForebet(){
-  if(!watching) return;
+function qualifies({ prob, minute, score }) {
+  return (
+    prob >= 60 &&
+    minute > 30 &&
+    (score === "0-0" || score === "0-1" || score === "1-0")
+  );
+}
 
-  try{
-    const res = await fetch("https://m.forebet.com/es/predicciones-para-hoy/predicciones-bajo-mas-2-5-goles");
+function extractLiveCandidates(html) {
+  // Heurística simple: buscamos % y miramos alrededor para minuto y marcador
+  const results = [];
+  const re = /(\d{1,3})%/g;
+
+  let m;
+  while ((m = re.exec(html)) !== null) {
+    const prob = parseInt(m[1], 10);
+    if (Number.isNaN(prob) || prob < 60) continue;
+
+    const start = Math.max(0, m.index - 250);
+    const end = Math.min(html.length, m.index + 250);
+    const chunk = html.slice(start, end);
+
+    const minuteMatch = chunk.match(/(\d{1,3})\s*['’]/); // 34' o 34’
+    const scoreMatch = chunk.match(/\b(\d{1,2}\s*-\s*\d{1,2})\b/);
+
+    if (!minuteMatch || !scoreMatch) continue;
+
+    const minute = parseInt(minuteMatch[1], 10);
+    const score = scoreMatch[1].replace(/\s*/g, "");
+
+    // Intento de nombre de partido (si no sale, igual alertamos)
+    const nameMatch = chunk.match(/([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 .'-]{3,}?)\s+vs\s+([A-Za-zÁÉÍÓÚÜÑáéíóúüñ0-9 .'-]{3,})/i);
+    const matchName = nameMatch ? `${nameMatch[1].trim()} vs ${nameMatch[2].trim()}` : "Partido en vivo";
+
+    results.push({ matchName, prob, minute, score });
+  }
+
+  // dedupe por matchName + score + minute (evita spam)
+  const dedup = new Map();
+  for (const r of results) {
+    const key = `${r.matchName}|${r.score}|${r.minute}|${r.prob}`;
+    if (!dedup.has(key)) dedup.set(key, r);
+  }
+  return [...dedup.values()];
+}
+
+async function poll() {
+  if (!watching) return;
+
+  try {
+    const url = "https://m.forebet.com/es/predicciones-para-hoy/predicciones-bajo-mas-2-5-goles";
+    const res = await fetch(url, { timeout: 30000 });
     const html = await res.text();
 
-    const probMatches = [...html.matchAll(/(\d{1,3})%/g)];
-    if(!probMatches.length) return;
+    const candidates = extractLiveCandidates(html).filter(qualifies);
 
-    for(const p of probMatches){
-      const prob = parseInt(p[1]);
-      if(prob < 60) continue;
+    // Solo alertar si hay al menos uno nuevo
+    for (const c of candidates) {
+      const alertKey = `${c.matchName}|${c.score}|${c.prob}`;
+      if (alerted.has(alertKey)) continue;
+      alerted.add(alertKey);
 
-      const chunk = html.substring(p.index-200, p.index+200);
-
-      const minute = chunk.match(/(\d{2})'/);
-      const score = chunk.match(/(\d-\d)/);
-
-      if(!minute || !score) continue;
-
-      const min = parseInt(minute[1]);
-      const sc = score[1];
-
-      if(min > 30 && ["0-0","0-1","1-0"].includes(sc)){
-        const key = chunk.slice(0,50);
-        if(alertedMatches.has(key)) continue;
-        alertedMatches.add(key);
-
-        bot.telegram.sendMessage(CHAT_ID,
-`🚨 ALERTA OVER 2.5
-
-⏱ Min ${min}'
-🔢 ${sc}
-📊 Prob ≥60%`);
-      }
+      await bot.telegram.sendMessage(
+        CHAT_ID,
+        `🚨 ALERTA OVER 2.5 (Forebet)\n\n⚽ ${c.matchName}\n⏱ Minuto: ${c.minute}'\n🔢 Marcador: ${c.score}\n📊 Prob Over 2.5: ${c.prob}%\n\n✅ Cumple criterios (EN VIVO, >30', score permitido, prob ≥60%)`
+      );
     }
-  }catch(e){
-    console.log("error scraping");
+  } catch (e) {
+    console.log("poll error:", e && e.message ? e.message : e);
   }
 }
 
-setInterval(checkForebet,60000);
-bot.launch();
+setInterval(poll, 60_000);
+
+bot.launch().then(() => console.log("Bot launched ✅"));
+process.once("SIGINT", () => bot.stop("SIGINT"));
+process.once("SIGTERM", () => bot.stop("SIGTERM"));
