@@ -16,7 +16,7 @@ const URL_OVER25 =
 const URL_BTTS =
   "https://m.forebet.com/es/predicciones-para-hoy/ambos-equipos-anotaran";
 
-// Probabilidades mínimas (ajústalas si quieres)
+// Probabilidades mínimas
 const RULES = {
   pollMs: 60_000,
   over25: { minProb: 50, minMinuteExclusive: 30, scores: ["0-0", "0-1", "1-0"] },
@@ -31,30 +31,45 @@ app.listen(PORT, () => console.log("Web alive on", PORT));
 
 // ================= TELEGRAM BOT =================
 const bot = new Telegraf(BOT_TOKEN);
-
 let watching = false;
 let debug = false;
 const alerted = new Set();
 
-bot.start((ctx) => ctx.reply("Bot listo ✅\n/watch para activar\n/stop para parar"));
+bot.start((ctx) => ctx.reply("Bot listo ✅\n/watch para activar\n/stop para parar\n/debugon debugoff"));
 bot.command("watch", (ctx) => { watching = true; ctx.reply("🟢 Monitoreo activado"); });
 bot.command("stop", (ctx) => { watching = false; ctx.reply("🔴 Monitoreo detenido"); });
 bot.command("status", (ctx) =>
-  ctx.reply(`Estado: ${watching ? "ACTIVO" : "DETENIDO"}\nAlertas: ${alerted.size}`)
+  ctx.reply(`Estado: ${watching ? "ACTIVO" : "DETENIDO"} | Alertas: ${alerted.size}`)
 );
 bot.command("reset", (ctx) => { alerted.clear(); ctx.reply("🧹 Alertas limpiadas"); });
 bot.command("debugon", (ctx) => { debug = true; ctx.reply("🧪 Debug ON"); });
 bot.command("debugoff", (ctx) => { debug = false; ctx.reply("🧪 Debug OFF"); });
 
-// ================= PARSE HELPERS =================
+// ================= FETCH CON HEADERS (como móvil) =================
+async function fetchHtml(url) {
+  const res = await fetch(url, {
+    timeout: 30_000,
+    headers: {
+      // Simula un navegador móvil real
+      "User-Agent":
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+      "Accept-Language": "es-ES,es;q=0.9,en;q=0.6",
+      "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Referer": "https://m.forebet.com/es/predicciones-para-hoy",
+      "Connection": "keep-alive",
+    }
+  });
+
+  const html = await res.text();
+  return { status: res.status, html };
+}
+
+// ================= PARSER HELPERS =================
 function norm(s) {
   return String(s || "").replace(/\s+/g, " ").trim();
 }
 
 function parseCurrentScoreFromText(t) {
-  // Ejemplos:
-  // "0 - 0(0 - 0)"  -> score actual "0-0"
-  // "0 - 0"         -> score actual "0-0"
   const m = t.match(/(\d{1,2})\s*-\s*(\d{1,2})(?=\s*\(|\s*$)/);
   return m ? `${m[1]}-${m[2]}` : null;
 }
@@ -66,10 +81,9 @@ function parseMinuteBeforeScore(text) {
   const idx = scoreMatch.index;
   const left = text.slice(0, idx);
 
-  // Captura números "solos" (no parte de decimales), pero ojo con fechas/horas:
-  // Nos quedamos con el ÚLTIMO número 1..130 justo antes del marcador.
+  // último número 1..130 antes del marcador
   const nums = [];
-  const re = /(?<![\d.,])(\d{1,3})(?![\d.,])/g; // Node 18 soporta lookbehind
+  const re = /(?<![\d.,])(\d{1,3})(?![\d.,])/g;
   let m;
   while ((m = re.exec(left)) !== null) {
     const n = parseInt(m[1], 10);
@@ -80,8 +94,7 @@ function parseMinuteBeforeScore(text) {
 }
 
 function parseProbsFromText(text) {
-  // En Forebet suele aparecer como "38 62" (dos columnas)
-  // tomamos el primer par razonable 0..100
+  // primer par "NN NN" 0..100
   const re = /(?<!\d)(\d{1,3})\s+(\d{1,3})(?!\d)/;
   const m = text.match(re);
   if (!m) return null;
@@ -92,26 +105,22 @@ function parseProbsFromText(text) {
 }
 
 function parseMatchNameFromRow($row) {
-  // Intento simple: texto del link principal (equipos + fecha/hora)
   const linkText = norm($row.find("a").first().text());
   if (!linkText) return "Partido";
-  // Quitamos la fecha/hora al final si viene "18/02/2026 11:00"
   return linkText.replace(/\b\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}\b.*$/, "").trim() || linkText;
 }
 
-// Scrape genérico de una página Forebet con tabla
-async function scrapeForebet(url) {
-  const res = await fetch(url, { timeout: 30_000 });
-  const html = await res.text();
+function scrapeFromHtml(html) {
   const $ = cheerio.load(html);
-
   const matches = [];
 
-  // La tabla de predicciones suele estar en filas <tr>.
   $("tr").each((_, tr) => {
     const $tr = $(tr);
     const text = norm($tr.text());
     if (!text) return;
+
+    // ignora cabeceras
+    if (/Probabilidad|Equipo local|Equipo visitante|Marcador Pred|Promedio/i.test(text)) return;
 
     const probs = parseProbsFromText(text);
     if (!probs) return;
@@ -120,19 +129,15 @@ async function scrapeForebet(url) {
     if (!score) return;
 
     const minute = parseMinuteBeforeScore(text);
-    if (minute === null) return; // si no hay minuto => NO es en vivo
+    if (minute === null) return; // sin minuto => no en vivo
 
-    // “FT” o “FIN” => ignorar por si aparece
     if (/\bFT\b|\bFIN\b/i.test(text)) return;
 
-    const matchName = parseMatchNameFromRow($tr);
-
     matches.push({
-      matchName,
+      matchName: parseMatchNameFromRow($tr),
       minute,
       score,
-      p2: probs.p2, // 2da columna (Más o Sí)
-      rawKey: text.slice(0, 120), // para anti-spam
+      p2: probs.p2,
     });
   });
 
@@ -162,14 +167,18 @@ function msgBTTS(m) {
 async function poll() {
   if (!watching) return;
 
+  // ---- OVER 2.5 ----
   try {
-    // ---- OVER 2.5 ----
-    const overList = await scrapeForebet(URL_OVER25);
+    const { status, html } = await fetchHtml(URL_OVER25);
+    const overList = scrapeFromHtml(html);
 
-    // Debug: muestra una muestra REAL de lo que leyó
     if (debug) {
-      const sample = overList.slice(0, 8).map(x => `OVER  | ${x.minute}' | ${x.score} | ${x.p2}% | ${x.matchName}`).join("\n");
-      await bot.telegram.sendMessage(CHAT_ID, `🧪 DEBUG (Over2.5)\n${sample || "No detecté partidos EN VIVO en Over2.5"}`);
+      const snippet = norm(html.slice(0, 400));
+      const sample = overList.slice(0, 6).map(x => `${x.minute}' ${x.score} ${x.p2}% | ${x.matchName}`).join("\n");
+      await bot.telegram.sendMessage(
+        CHAT_ID,
+        `🧪 DEBUG Over2.5\nHTTP: ${status}\nHTML len: ${html.length}\nMatches parsed: ${overList.length}\n\nSample:\n${sample || "(vacío)"}\n\nHTML snippet:\n${snippet}`
+      );
     }
 
     for (const m of overList) {
@@ -183,13 +192,22 @@ async function poll() {
 
       await bot.telegram.sendMessage(CHAT_ID, msgOver(m));
     }
+  } catch (e) {
+    console.log("Over2.5 error:", e?.message || e);
+  }
 
-    // ---- BTTS ----
-    const bttsList = await scrapeForebet(URL_BTTS);
+  // ---- BTTS ----
+  try {
+    const { status, html } = await fetchHtml(URL_BTTS);
+    const bttsList = scrapeFromHtml(html);
 
     if (debug) {
-      const sample = bttsList.slice(0, 8).map(x => `BTTS | ${x.minute}' | ${x.score} | ${x.p2}% | ${x.matchName}`).join("\n");
-      await bot.telegram.sendMessage(CHAT_ID, `🧪 DEBUG (BTTS)\n${sample || "No detecté partidos EN VIVO en BTTS"}`);
+      const snippet = norm(html.slice(0, 400));
+      const sample = bttsList.slice(0, 6).map(x => `${x.minute}' ${x.score} ${x.p2}% | ${x.matchName}`).join("\n");
+      await bot.telegram.sendMessage(
+        CHAT_ID,
+        `🧪 DEBUG BTTS\nHTTP: ${status}\nHTML len: ${html.length}\nMatches parsed: ${bttsList.length}\n\nSample:\n${sample || "(vacío)"}\n\nHTML snippet:\n${snippet}`
+      );
     }
 
     for (const m of bttsList) {
@@ -204,7 +222,7 @@ async function poll() {
       await bot.telegram.sendMessage(CHAT_ID, msgBTTS(m));
     }
   } catch (e) {
-    console.log("poll error:", e?.message || e);
+    console.log("BTTS error:", e?.message || e);
   }
 }
 
