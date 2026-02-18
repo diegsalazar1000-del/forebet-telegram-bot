@@ -19,7 +19,6 @@ const URL_BTTS =
   "https://m.forebet.com/es/predicciones-para-hoy/ambos-equipos-anotaran";
 
 // ===================== RULES =====================
-// Si quieres volver a 60%, cambia minProb a 60.
 const RULES = {
   pollMs: 60_000,
   over25: { minProb: 50, minMinuteExclusive: 30, scores: ["0-0", "0-1", "1-0"] },
@@ -30,7 +29,6 @@ const RULES = {
 const app = express();
 const PORT = process.env.PORT || 10000;
 app.get("/", (_req, res) => res.send("OK"));
-app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 app.listen(PORT, () => console.log("Web alive on", PORT));
 
 // ===================== TELEGRAM BOT =====================
@@ -42,27 +40,35 @@ let debugChatId = null;
 
 const alerted = new Set();
 
+async function dmsg(text) {
+  if (!debug) return;
+  const target = debugChatId || CHAT_ID;
+  try {
+    await bot.telegram.sendMessage(target, text);
+  } catch (_) {}
+}
+
 bot.start((ctx) =>
   ctx.reply(
     "✅ Bot listo.\n\n/watch activar\n/stop detener\n/status estado\n/debugon debug\n/debugoff\n/reset limpiar alertas"
   )
 );
 
-bot.command("watch", (ctx) => {
+bot.command("watch", async (ctx) => {
   watching = true;
-  ctx.reply("🟢 Monitoreo activado");
+  await ctx.reply("🟢 Monitoreo activado");
+  await dmsg("✅ Debug: /watch activado (poll correrá cada minuto).");
 });
 
-bot.command("stop", (ctx) => {
+bot.command("stop", async (ctx) => {
   watching = false;
-  ctx.reply("🔴 Monitoreo detenido");
+  await ctx.reply("🔴 Monitoreo detenido");
+  await dmsg("⚠️ Debug: /watch está OFF, no se ejecuta poll.");
 });
 
 bot.command("status", (ctx) => {
   ctx.reply(
-    `Estado: ${watching ? "ACTIVO" : "DETENIDO"}\nDebug: ${
-      debug ? "ON" : "OFF"
-    }\nAlertas enviadas: ${alerted.size}`
+    `Estado: ${watching ? "ACTIVO" : "DETENIDO"}\nDebug: ${debug ? "ON" : "OFF"}\nAlertas: ${alerted.size}`
   );
 });
 
@@ -71,10 +77,13 @@ bot.command("reset", (ctx) => {
   ctx.reply("🧹 Alertas limpiadas");
 });
 
-bot.command("debugon", (ctx) => {
+bot.command("debugon", async (ctx) => {
   debug = true;
   debugChatId = ctx.chat.id;
-  ctx.reply("🧪 Debug ON");
+  await ctx.reply("🧪 Debug ON");
+  await dmsg(
+    `🧪 Debug está ON en ESTE chat.\nWatch: ${watching ? "ON" : "OFF"}\nSi Watch está OFF, manda /watch para que empiece el poll.`
+  );
 });
 
 bot.command("debugoff", (ctx) => {
@@ -83,21 +92,12 @@ bot.command("debugoff", (ctx) => {
   ctx.reply("🧪 Debug OFF");
 });
 
-function dmsg(text) {
-  if (!debug) return;
-  const target = debugChatId || CHAT_ID;
-  bot.telegram.sendMessage(target, text).catch(() => {});
-}
-
-// ===================== BROWSERLESS (real browser) =====================
-// Usamos /function para poder esperar selectores antes de extraer HTML final.
+// ===================== BROWSERLESS =====================
 async function browserlessGetHtml(url) {
   const endpoint = `https://chrome.browserless.io/function?token=${encodeURIComponent(
     BROWSERLESS_TOKEN
   )}`;
 
-  // OJO: incrustamos la URL como string dentro del código remoto.
-  // Escapamos comillas por seguridad básica.
   const safeUrl = String(url).replace(/"/g, '\\"');
 
   const res = await fetch(endpoint, {
@@ -107,13 +107,8 @@ async function browserlessGetHtml(url) {
       code: `
         module.exports = async ({ page }) => {
           await page.goto("${safeUrl}", { waitUntil: "networkidle2", timeout: 60000 });
-
-          // Espera a que exista alguna tabla (Forebet suele renderizar así)
           await page.waitForSelector("table", { timeout: 25000 });
-
-          // Espera extra para que carguen filas/minutos en vivo
           await page.waitForTimeout(6000);
-
           return await page.content();
         }
       `,
@@ -122,7 +117,7 @@ async function browserlessGetHtml(url) {
 
   if (!res.ok) {
     const t = await res.text().catch(() => "");
-    throw new Error(`Browserless HTTP ${res.status}: ${t.slice(0, 150)}`);
+    throw new Error(\`Browserless HTTP \${res.status}: \${t.slice(0, 150)}\`);
   }
 
   return await res.text();
@@ -134,13 +129,11 @@ function norm(s) {
 }
 
 function parseScore(text) {
-  // "0 - 0(0 - 0)" o "0 - 0"
   const m = text.match(/(\d{1,2})\s*-\s*(\d{1,2})(?=\s*\(|\s*$)/);
   return m ? `${m[1]}-${m[2]}` : null;
 }
 
 function parseMinute(text) {
-  // Toma el último número 1..130 antes del score
   const scoreMatch = text.match(/(\d{1,2}\s*-\s*\d{1,2})/);
   if (!scoreMatch) return null;
 
@@ -153,7 +146,6 @@ function parseMinute(text) {
 }
 
 function parseProb2(text) {
-  // primer par "NN NN", usamos el 2do (Más o Sí)
   const m = text.match(/(?<!\d)(\d{1,3})\s+(\d{1,3})(?!\d)/);
   if (!m) return null;
   const p2 = parseInt(m[2], 10);
@@ -196,7 +188,7 @@ function scrapeMatches(html) {
   return matches;
 }
 
-// ===================== ALERT MESSAGES =====================
+// ===================== ALERTS =====================
 function msgOver(m) {
   return `🚨 OVER 2.5 (Forebet)
 
@@ -217,14 +209,19 @@ function msgBTTS(m) {
 
 // ===================== MAIN LOOP =====================
 async function poll() {
+  // ✅ Latido de debug para confirmar que el proceso vive,
+  // aunque /watch esté apagado
+  if (debug) {
+    await dmsg(`⏱ Heartbeat: bot vivo. Watch=${watching ? "ON" : "OFF"}`);
+  }
+
   if (!watching) return;
 
-  // -------- OVER 2.5 --------
+  // OVER
   try {
     const htmlOver = await browserlessGetHtml(URL_OVER25);
     const over = scrapeMatches(htmlOver);
-
-    dmsg(`En vivo Over 2.5 goles:\nDEBUG Over: parsed=${over.length}`);
+    await dmsg(`En vivo Over 2.5 goles:\nDEBUG Over: parsed=${over.length}`);
 
     for (const m of over) {
       if (m.prob < RULES.over25.minProb) continue;
@@ -239,15 +236,14 @@ async function poll() {
     }
   } catch (e) {
     console.log("Over error:", e.message);
-    dmsg(`❌ Over error: ${e.message}`);
+    await dmsg(`❌ Over error: ${e.message}`);
   }
 
-  // -------- BTTS --------
+  // BTTS
   try {
     const htmlBtts = await browserlessGetHtml(URL_BTTS);
     const btts = scrapeMatches(htmlBtts);
-
-    dmsg(`\nEn vivo BTTS:\nDEBUG BTTS: parsed=${btts.length}`);
+    await dmsg(`En vivo BTTS:\nDEBUG BTTS: parsed=${btts.length}`);
 
     for (const m of btts) {
       if (m.prob < RULES.btts.minProb) continue;
@@ -262,7 +258,7 @@ async function poll() {
     }
   } catch (e) {
     console.log("BTTS error:", e.message);
-    dmsg(`❌ BTTS error: ${e.message}`);
+    await dmsg(`❌ BTTS error: ${e.message}`);
   }
 }
 
