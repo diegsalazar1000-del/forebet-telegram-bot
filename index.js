@@ -91,24 +91,29 @@ bot.command("debugoff", (ctx) => {
   ctx.reply("🧪 Debug OFF");
 });
 
-// ===================== BROWSERLESS (con error detallado) =====================
+// ===================== BROWSERLESS (fix module is not defined) =====================
 async function browserlessGetHtml(url) {
-  // Probamos endpoint /function (más control)
   const endpoint = `https://chrome.browserless.io/function?token=${encodeURIComponent(
     BROWSERLESS_TOKEN
   )}`;
 
   const safeUrl = String(url).replace(/"/g, '\\"');
 
+  // ✅ IMPORTANTE:
+  // Aquí NO usamos module.exports.
+  // El code es el “cuerpo” que Browserless ejecuta con "page" disponible.
   const payload = {
     code: `
-      module.exports = async ({ page }) => {
-        await page.goto("${safeUrl}", { waitUntil: "domcontentloaded", timeout: 60000 });
-        // Esperar tabla (Forebet)
-        await page.waitForSelector("table", { timeout: 25000 });
-        await page.waitForTimeout(6000);
-        return await page.content();
-      }
+      // "page" ya existe aquí
+      await page.goto("${safeUrl}", { waitUntil: "domcontentloaded", timeout: 60000 });
+
+      // Espera a que la tabla exista
+      await page.waitForSelector("table", { timeout: 25000 });
+
+      // Espera extra para que carguen los datos en vivo
+      await page.waitForTimeout(7000);
+
+      return await page.content();
     `,
   };
 
@@ -121,7 +126,6 @@ async function browserlessGetHtml(url) {
   const text = await res.text().catch(() => "");
 
   if (!res.ok) {
-    // Lanzamos un error con el status real y un pedazo del cuerpo
     throw new Error(`Browserless HTTP ${res.status}: ${text.slice(0, 180)}`);
   }
 
@@ -173,7 +177,6 @@ function scrapeMatches(html) {
     const text = norm($tr.text());
     if (!text) return;
 
-    // si por cualquier motivo aparece un challenge
     if (/Just a moment|verify you are human/i.test(text)) return;
 
     const prob = parseProb2(text);
@@ -205,7 +208,6 @@ function msgBTTS(m) {
 
 // ===================== LOOP =====================
 async function poll() {
-  // Heartbeat: siempre (aunque watching OFF o haya errores)
   if (debug) {
     await dmsg(`⏱ Heartbeat OK. Watch=${watching ? "ON" : "OFF"}`);
   }
