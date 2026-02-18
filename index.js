@@ -6,10 +6,10 @@ const CHAT_ID = process.env.CHAT_ID;
 let watching = false;
 let alertedMatches = new Set();
 
-bot.start(ctx => ctx.reply("Bot listo. Escribe /watch"));
+bot.start(ctx => ctx.reply("Bot listo. Usa /watch para activar"));
 bot.command("watch", ctx => {
   watching = true;
-  ctx.reply("Monitoreo Forebet activado ⚽");
+  ctx.reply("Monitoreo activado ⚽");
 });
 bot.command("stop", ctx => {
   watching = false;
@@ -23,38 +23,38 @@ async function checkForebet(){
     const res = await fetch("https://m.forebet.com/es/predicciones-para-hoy/predicciones-bajo-mas-2-5-goles");
     const html = await res.text();
 
-    const matches = html.match(/(\d{1,3}%)(.*?)vs(.*?)(\d-\d)/gs);
-    if(!matches) return;
+    const probMatches = [...html.matchAll(/(\d{1,3})%/g)];
+    if(!probMatches.length) return;
 
-    for(const m of matches){
-      const probMatch = m.match(/\d{1,3}%/);
-      const scoreMatch = m.match(/\d-\d/);
-      const minuteMatch = m.match(/(\d{2})'/);
+    for(const p of probMatches){
+      const prob = parseInt(p[1]);
+      if(prob < 60) continue;
 
-      if(!probMatch || !scoreMatch || !minuteMatch) continue;
+      const chunk = html.substring(p.index-200, p.index+200);
 
-      const prob = parseInt(probMatch[0]);
-      const score = scoreMatch[0];
-      const minute = parseInt(minuteMatch[1]);
+      const minute = chunk.match(/(\d{2})'/);
+      const score = chunk.match(/(\d-\d)/);
 
-      if(
-        prob >= 60 &&
-        minute > 30 &&
-        ["0-0","0-1","1-0"].includes(score)
-      ){
-        if(alertedMatches.has(m)) continue;
-        alertedMatches.add(m);
+      if(!minute || !score) continue;
+
+      const min = parseInt(minute[1]);
+      const sc = score[1];
+
+      if(min > 30 && ["0-0","0-1","1-0"].includes(sc)){
+        const key = chunk.slice(0,50);
+        if(alertedMatches.has(key)) continue;
+        alertedMatches.add(key);
 
         bot.telegram.sendMessage(CHAT_ID,
 `🚨 ALERTA OVER 2.5
 
-⏱ Minuto ${minute}'
-🔢 Marcador ${score}
-📊 Probabilidad ${prob}%`);
+⏱ Min ${min}'
+🔢 ${sc}
+📊 Prob ≥60%`);
       }
     }
   }catch(e){
-    console.log("Error scraping");
+    console.log("error scraping");
   }
 }
 
