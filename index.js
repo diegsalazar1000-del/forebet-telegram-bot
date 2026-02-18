@@ -38,7 +38,6 @@ const bot = new Telegraf(BOT_TOKEN);
 let watching = false;
 let debug = false;
 let debugChatId = null;
-
 const alerted = new Set();
 
 async function dmsg(text) {
@@ -81,8 +80,7 @@ bot.command("reset", (ctx) => {
 bot.command("debugon", async (ctx) => {
   debug = true;
   debugChatId = ctx.chat.id;
-  await ctx.reply("🧪 Debug ON");
-  await dmsg(`🧪 Debug activo en este chat.\nWatch=${watching ? "ON" : "OFF"}`);
+  await ctx.reply("🧪 Debug activo en este chat.\nWatch=ON");
 });
 
 bot.command("debugoff", (ctx) => {
@@ -91,7 +89,7 @@ bot.command("debugoff", (ctx) => {
   ctx.reply("🧪 Debug OFF");
 });
 
-// ===================== BROWSERLESS (fix module is not defined) =====================
+// ===================== BROWSERLESS (IIFE para permitir return) =====================
 async function browserlessGetHtml(url) {
   const endpoint = `https://chrome.browserless.io/function?token=${encodeURIComponent(
     BROWSERLESS_TOKEN
@@ -99,21 +97,15 @@ async function browserlessGetHtml(url) {
 
   const safeUrl = String(url).replace(/"/g, '\\"');
 
-  // ✅ IMPORTANTE:
-  // Aquí NO usamos module.exports.
-  // El code es el “cuerpo” que Browserless ejecuta con "page" disponible.
+  // ✅ Envolvemos en una IIFE async para que "return" sea válido.
   const payload = {
     code: `
-      // "page" ya existe aquí
-      await page.goto("${safeUrl}", { waitUntil: "domcontentloaded", timeout: 60000 });
-
-      // Espera a que la tabla exista
-      await page.waitForSelector("table", { timeout: 25000 });
-
-      // Espera extra para que carguen los datos en vivo
-      await page.waitForTimeout(7000);
-
-      return await page.content();
+      (async () => {
+        await page.goto("${safeUrl}", { waitUntil: "domcontentloaded", timeout: 60000 });
+        await page.waitForSelector("table", { timeout: 25000 });
+        await page.waitForTimeout(8000);
+        return await page.content();
+      })()
     `,
   };
 
@@ -126,7 +118,7 @@ async function browserlessGetHtml(url) {
   const text = await res.text().catch(() => "");
 
   if (!res.ok) {
-    throw new Error(`Browserless HTTP ${res.status}: ${text.slice(0, 180)}`);
+    throw new Error(`Browserless HTTP ${res.status}: ${text.slice(0, 220)}`);
   }
 
   return text;
@@ -202,19 +194,11 @@ function msgOver(m) {
   return `🚨 OVER 2.5 (Forebet)\n\n⚽ ${m.match}\n⏱ ${m.minute}'\n🔢 ${m.score}\n📊 ${m.prob}%`;
 }
 
-function msgBTTS(m) {
-  return `🔥 BTTS (Forebet)\n\n⚽ ${m.match}\n⏱ ${m.minute}'\n🔢 ${m.score}\n📊 ${m.prob}%`;
-}
-
 // ===================== LOOP =====================
 async function poll() {
-  if (debug) {
-    await dmsg(`⏱ Heartbeat OK. Watch=${watching ? "ON" : "OFF"}`);
-  }
-
+  if (debug) await dmsg(`⏱ Heartbeat OK. Watch=${watching ? "ON" : "OFF"}`);
   if (!watching) return;
 
-  // OVER 2.5
   try {
     const htmlOver = await browserlessGetHtml(URL_OVER25);
     const over = scrapeMatches(htmlOver);
@@ -236,23 +220,10 @@ async function poll() {
     await dmsg(`❌ Over error: ${e.message}`);
   }
 
-  // BTTS
   try {
     const htmlBtts = await browserlessGetHtml(URL_BTTS);
     const btts = scrapeMatches(htmlBtts);
     await dmsg(`DEBUG BTTS: parsed=${btts.length}`);
-
-    for (const m of btts) {
-      if (m.prob < RULES.btts.minProb) continue;
-      if (!(m.minute >= RULES.btts.minMinuteInclusive)) continue;
-      if (m.score !== RULES.btts.score) continue;
-
-      const key = `B|${m.match}|${m.minute}|${m.score}|${m.prob}`;
-      if (alerted.has(key)) continue;
-      alerted.add(key);
-
-      await bot.telegram.sendMessage(CHAT_ID, msgBTTS(m));
-    }
   } catch (e) {
     console.log("BTTS error:", e.message);
     await dmsg(`❌ BTTS error: ${e.message}`);
