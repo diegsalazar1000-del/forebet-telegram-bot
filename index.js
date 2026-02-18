@@ -10,13 +10,14 @@ const CHAT_ID = process.env.CHAT_ID;
 if (!BOT_TOKEN) throw new Error("Falta BOT_TOKEN");
 if (!CHAT_ID) throw new Error("Falta CHAT_ID");
 
+// ✅ URLs NO MÓVILES (www)
 const URL_OVER25 =
-  "https://m.forebet.com/es/predicciones-para-hoy/predicciones-bajo-mas-2-5-goles";
+  "https://www.forebet.com/es/predicciones-para-hoy/predicciones-bajo-mas-2-5-goles";
 
 const URL_BTTS =
-  "https://m.forebet.com/es/predicciones-para-hoy/ambos-equipos-anotaran";
+  "https://www.forebet.com/es/predicciones-para-hoy/ambos-equipos-anotaran";
 
-// Probabilidades mínimas
+// Reglas (ahora 50%)
 const RULES = {
   pollMs: 60_000,
   over25: { minProb: 50, minMinuteExclusive: 30, scores: ["0-0", "0-1", "1-0"] },
@@ -35,7 +36,12 @@ let watching = false;
 let debug = false;
 const alerted = new Set();
 
-bot.start((ctx) => ctx.reply("Bot listo ✅\n/watch para activar\n/stop para parar\n/debugon debugoff"));
+bot.start((ctx) =>
+  ctx.reply(
+    "Bot listo ✅\n/watch activar\n/stop detener\n/status estado\n/debugon debug\n/debugoff\n/reset"
+  )
+);
+
 bot.command("watch", (ctx) => { watching = true; ctx.reply("🟢 Monitoreo activado"); });
 bot.command("stop", (ctx) => { watching = false; ctx.reply("🔴 Monitoreo detenido"); });
 bot.command("status", (ctx) =>
@@ -45,31 +51,32 @@ bot.command("reset", (ctx) => { alerted.clear(); ctx.reply("🧹 Alertas limpiad
 bot.command("debugon", (ctx) => { debug = true; ctx.reply("🧪 Debug ON"); });
 bot.command("debugoff", (ctx) => { debug = false; ctx.reply("🧪 Debug OFF"); });
 
-// ================= FETCH CON HEADERS (como móvil) =================
+// ================= FETCH CON HEADERS =================
 async function fetchHtml(url) {
   const res = await fetch(url, {
     timeout: 30_000,
     headers: {
-      // Simula un navegador móvil real
+      // Fingimos navegador normal (desktop) para www
       "User-Agent":
-        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1",
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
       "Accept-Language": "es-ES,es;q=0.9,en;q=0.6",
       "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Referer": "https://m.forebet.com/es/predicciones-para-hoy",
+      "Referer": "https://www.forebet.com/es/predicciones-para-hoy",
       "Connection": "keep-alive",
-    }
+    },
   });
 
   const html = await res.text();
   return { status: res.status, html };
 }
 
-// ================= PARSER HELPERS =================
+// ================= PARSE HELPERS =================
 function norm(s) {
   return String(s || "").replace(/\s+/g, " ").trim();
 }
 
 function parseCurrentScoreFromText(t) {
+  // "0 - 0(0 - 0)" o "0 - 0"
   const m = t.match(/(\d{1,2})\s*-\s*(\d{1,2})(?=\s*\(|\s*$)/);
   return m ? `${m[1]}-${m[2]}` : null;
 }
@@ -83,7 +90,7 @@ function parseMinuteBeforeScore(text) {
 
   // último número 1..130 antes del marcador
   const nums = [];
-  const re = /(?<![\d.,])(\d{1,3})(?![\d.,])/g;
+  const re = /(?<![\d.,])(\d{1,3})(?![\d.,])/g; // Node 18 ok
   let m;
   while ((m = re.exec(left)) !== null) {
     const n = parseInt(m[1], 10);
@@ -94,7 +101,7 @@ function parseMinuteBeforeScore(text) {
 }
 
 function parseProbsFromText(text) {
-  // primer par "NN NN" 0..100
+  // primer par "NN NN" (dos columnas)
   const re = /(?<!\d)(\d{1,3})\s+(\d{1,3})(?!\d)/;
   const m = text.match(re);
   if (!m) return null;
@@ -107,6 +114,7 @@ function parseProbsFromText(text) {
 function parseMatchNameFromRow($row) {
   const linkText = norm($row.find("a").first().text());
   if (!linkText) return "Partido";
+  // a veces contiene fecha/hora al final
   return linkText.replace(/\b\d{2}\/\d{2}\/\d{4}\s+\d{2}:\d{2}\b.*$/, "").trim() || linkText;
 }
 
@@ -119,8 +127,8 @@ function scrapeFromHtml(html) {
     const text = norm($tr.text());
     if (!text) return;
 
-    // ignora cabeceras
-    if (/Probabilidad|Equipo local|Equipo visitante|Marcador Pred|Promedio/i.test(text)) return;
+    // Ignora cabeceras típicas
+    if (/Equipo local|Equipo visitante|Probabilidad|Tiempo|Marcador Pred|Promedio/i.test(text)) return;
 
     const probs = parseProbsFromText(text);
     if (!probs) return;
@@ -137,14 +145,14 @@ function scrapeFromHtml(html) {
       matchName: parseMatchNameFromRow($tr),
       minute,
       score,
-      p2: probs.p2,
+      p2: probs.p2, // Over: "Más", BTTS: "Sí"
     });
   });
 
   return matches;
 }
 
-// ================= ALERT TEXT =================
+// ================= ALERTS =================
 function msgOver(m) {
   return `🚨 ALERTA OVER 2.5 (Forebet)
 
@@ -170,14 +178,15 @@ async function poll() {
   // ---- OVER 2.5 ----
   try {
     const { status, html } = await fetchHtml(URL_OVER25);
+
     const overList = scrapeFromHtml(html);
 
     if (debug) {
-      const snippet = norm(html.slice(0, 400));
-      const sample = overList.slice(0, 6).map(x => `${x.minute}' ${x.score} ${x.p2}% | ${x.matchName}`).join("\n");
+      const snippet = norm(html.slice(0, 220));
+      const sample = overList.slice(0, 8).map(x => `${x.minute}' ${x.score} ${x.p2}% | ${x.matchName}`).join("\n");
       await bot.telegram.sendMessage(
         CHAT_ID,
-        `🧪 DEBUG Over2.5\nHTTP: ${status}\nHTML len: ${html.length}\nMatches parsed: ${overList.length}\n\nSample:\n${sample || "(vacío)"}\n\nHTML snippet:\n${snippet}`
+        `🧪 DEBUG Over2.5 (www)\nHTTP: ${status}\nHTML len: ${html.length}\nParsed: ${overList.length}\n\nSample:\n${sample || "(vacío)"}\n\nSnippet:\n${snippet}`
       );
     }
 
@@ -193,20 +202,21 @@ async function poll() {
       await bot.telegram.sendMessage(CHAT_ID, msgOver(m));
     }
   } catch (e) {
-    console.log("Over2.5 error:", e?.message || e);
+    console.log("Over error:", e?.message || e);
   }
 
   // ---- BTTS ----
   try {
     const { status, html } = await fetchHtml(URL_BTTS);
+
     const bttsList = scrapeFromHtml(html);
 
     if (debug) {
-      const snippet = norm(html.slice(0, 400));
-      const sample = bttsList.slice(0, 6).map(x => `${x.minute}' ${x.score} ${x.p2}% | ${x.matchName}`).join("\n");
+      const snippet = norm(html.slice(0, 220));
+      const sample = bttsList.slice(0, 8).map(x => `${x.minute}' ${x.score} ${x.p2}% | ${x.matchName}`).join("\n");
       await bot.telegram.sendMessage(
         CHAT_ID,
-        `🧪 DEBUG BTTS\nHTTP: ${status}\nHTML len: ${html.length}\nMatches parsed: ${bttsList.length}\n\nSample:\n${sample || "(vacío)"}\n\nHTML snippet:\n${snippet}`
+        `🧪 DEBUG BTTS (www)\nHTTP: ${status}\nHTML len: ${html.length}\nParsed: ${bttsList.length}\n\nSample:\n${sample || "(vacío)"}\n\nSnippet:\n${snippet}`
       );
     }
 
