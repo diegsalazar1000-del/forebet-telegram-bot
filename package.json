@@ -1,13 +1,9 @@
 {
-  "name": "forebet-telegram-bot",
+  "name": "forebet-telegram-bциаot",
   "version": "1.0.0",
   "private": true,
-  "scripts": {
-    "start": "node index.js"
-  },
-  "engines": {
-    "node": ">=18"
-  },
+  "scripts": { "start": "node index.js" },
+  "engines": { "node": ">=18" },
   "dependencies": {
     "cheerio": "^1.0.0-rc.12",
     "express": "^4.19.2",
